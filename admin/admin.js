@@ -188,6 +188,7 @@
         S.schema = data.schema;
         S.icons = data.icons;
         S.reserved = data.reservedSlugs;
+        S.storage = data.storage;
         renderShell();
         route();
         loadOrders();
@@ -325,8 +326,27 @@
       a.classList.toggle("is-active", a.dataset.view === navKey);
     });
     var fn = VIEWS[view] || VIEWS.dashboard;
-    content.replaceChildren(linkOptions(), fn(param));
+    content.replaceChildren(linkOptions(), storageNotice(), fn(param));
     window.scrollTo(0, 0);
+  }
+
+  function storageNotice() {
+    var st = S.storage || {};
+    var items = [];
+    if (!st.persistent) items.push("No database is connected, so changes, orders and messages can't be saved. In Vercel, open this project › Storage › Create Database › Upstash Redis (free), connect it, then redeploy.");
+    if (!st.uploads) items.push("Image uploads need Vercel Blob. In Vercel, open this project › Storage › Create › Blob, connect it, then redeploy.");
+    if (!items.length) return null;
+    return h(
+      "div",
+      { class: "notice notice--warn" },
+      h(
+        "div",
+        null,
+        items.map(function (t) {
+          return h("p", { style: "margin:0 0 4px" }, t);
+        })
+      )
+    );
   }
 
   function markDirty() {
@@ -995,6 +1015,35 @@
     });
   }
 
+  var MAX_UPLOAD_BYTES = 3 * 1024 * 1024;
+
+  function shrinkImage(file) {
+    if (!/^image\/(jpeg|png|webp)$/.test(file.type) || file.size < 1.5 * 1024 * 1024) return Promise.resolve(file);
+    return new Promise(function (resolve) {
+      var img = new Image();
+      img.onload = function () {
+        var scale = Math.min(1, 2000 / Math.max(img.width, img.height));
+        var canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        var type = file.type === "image/png" ? "image/png" : "image/jpeg";
+        canvas.toBlob(
+          function (blob) {
+            URL.revokeObjectURL(img.src);
+            resolve(blob && blob.size < file.size ? new File([blob], file.name.replace(/\.\w+$/, type === "image/png" ? ".png" : ".jpg"), { type: type }) : file);
+          },
+          type,
+          0.85
+        );
+      };
+      img.onerror = function () {
+        resolve(file);
+      };
+      img.src = URL.createObjectURL(file);
+    });
+  }
+
   function uploadFiles(files) {
     var list = Array.prototype.filter.call(files, function (f) {
       return /^image\//.test(f.type) || f.type === "application/pdf";
@@ -1008,7 +1057,11 @@
     return list
       .reduce(function (p, file) {
         return p.then(function () {
-          return readFile(file)
+          return shrinkImage(file)
+            .then(function (small) {
+              if (small.size > MAX_UPLOAD_BYTES && S.storage && S.storage.onVercel) throw new Error("too large. Please keep files under 3 MB");
+              return readFile(small);
+            })
             .then(function (data) {
               return api("POST", "/admin/api/media", { name: file.name, data: data });
             })
@@ -2792,13 +2845,14 @@
                     {
                       class: "btn btn--icon",
                       type: "button",
-                      title: "Delete",
+                      title: m.deletable ? "Delete" : "Comes with the site, can't be deleted here",
                       "aria-label": "Delete " + m.name,
+                      disabled: !m.deletable,
                       onclick: function () {
                         if (!confirm("Delete " + m.name + "?")) return;
-                        api("DELETE", "/admin/api/media/" + encodeURIComponent(m.name))
+                        api("DELETE", "/admin/api/media?id=" + encodeURIComponent(m.id))
                           .catch(function (e) {
-                            if (e.status === 409 && confirm(e.message)) return api("DELETE", "/admin/api/media/" + encodeURIComponent(m.name) + "?force=1");
+                            if (e.status === 409 && confirm(e.message)) return api("DELETE", "/admin/api/media?id=" + encodeURIComponent(m.id) + "&force=1");
                             throw e;
                           })
                           .then(function (res) {
